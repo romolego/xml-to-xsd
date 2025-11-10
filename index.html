@@ -177,9 +177,16 @@ textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px
   class NodeInfo{
     constructor(name, path){
       this.name = name; this.path = path;
-      this.count = 0; this.children = new Map(); this.order = [];
+      this.count = 0;
+      this.children = new Map();
+      this.appearanceOrder = [];
       this.attrs = new Map();
-      this.textType = null; this.nillable = false; this.maxDepth = 1;
+      this.textType = null;
+      this.nillable = false;
+      this.maxDepth = 1;
+      this.sequences = [];
+      this.edges = new Map();
+      this.hasSplitRuns = false;
     }
   }
 
@@ -192,19 +199,26 @@ textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px
 
     if (node.attributes && node.attributes.length){
       for(const a of node.attributes){
-        const prev = info.attrs.get(a.name) || {type:null,nillable:false,seenEmpty:false};
+        const isNilAttr = (a.namespaceURI === 'http://www.w3.org/2001/XMLSchema-instance' && a.localName === 'nil') || a.name === 'xsi:nil';
+        if (isNilAttr){
+          if (/^(?:true|1)$/i.test(String(a.value||''))){ info.nillable = true; }
+          continue;
+        }
+        const prev = info.attrs.get(a.name) || {type:null,count:0,seenEmpty:false};
         prev.type = unify(prev.type, guess(a.value));
-        if ((a.value??'').trim()===''){ prev.nillable = true; prev.seenEmpty = true; }
+        prev.count += 1;
+        if ((a.value??'').trim()===''){ prev.seenEmpty = true; }
         info.attrs.set(a.name, prev);
       }
     }
 
     const elsKids = [];
+    let hasTextHere = false;
     for(const ch of node.childNodes){
       if (ch.nodeType===1) elsKids.push(ch);
       else if (ch.nodeType===3){
         const t = ch.nodeValue.trim();
-        if (t!==''){ info.textType = unify(info.textType, guess(t)); }
+        if (t!==''){ info.textType = unify(info.textType, guess(t)); hasTextHere = true; }
         else if (opt.nil){ info.nillable = true; }
       }
     }
@@ -212,100 +226,242 @@ textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px
     if (elsKids.length){
       const perName = new Map();
       for (const e of elsKids) perName.set(e.nodeName, (perName.get(e.nodeName)||0)+1);
+      for (const [childName, meta] of info.children.entries()){
+        if (!perName.has(childName)){
+          meta.min = 0;
+        }
+      }
       for (const [n,c] of perName){
-        const meta = info.children.get(n) || {min:c,max:c};
-        meta.min = Math.min(meta.min, c); meta.max = Math.max(meta.max, c);
-        info.children.set(n, meta);
-        if (!info.order.includes(n)) info.order.push(n);
+        let meta = info.children.get(n);
+        if (!meta){
+          meta = {min:c,max:c};
+          info.children.set(n, meta);
+          if (!info.appearanceOrder.includes(n)) info.appearanceOrder.push(n);
+        } else {
+          meta.min = Math.min(meta.min, c);
+          meta.max = Math.max(meta.max, c);
+        }
+      }
+      const seqNames = elsKids.map(e=>e.nodeName);
+      info.sequences.push(seqNames);
+      const runs = [];
+      for (const name of seqNames){
+        const last = runs[runs.length-1];
+        if (last && last.name === name) last.count += 1;
+        else runs.push({name,count:1});
+      }
+      if (!info.hasSplitRuns){
+        const seen = new Set();
+        for (const r of runs){
+          if (seen.has(r.name)){ info.hasSplitRuns = true; break; }
+          seen.add(r.name);
+        }
+      }
+      const uniqSeq = [];
+      for (const name of seqNames){
+        if (uniqSeq[uniqSeq.length-1] !== name){ uniqSeq.push(name); }
+      }
+      for (let i=0;i<uniqSeq.length-1;i++){
+        const from = uniqSeq[i];
+        const to = uniqSeq[i+1];
+        if (!info.edges.has(from)) info.edges.set(from, new Set());
+        info.edges.get(from).add(to);
       }
       for (const e of elsKids){
         walk(e, curr, model);
         const child = model.get(curr + '/' + e.nodeName);
         info.maxDepth = Math.max(info.maxDepth, (child?.maxDepth||1)+1);
+        if (!info.appearanceOrder.includes(e.nodeName)) info.appearanceOrder.push(e.nodeName);
       }
     } else {
+      for (const meta of info.children.values()) meta.min = 0;
+      info.sequences.push([]);
       info.maxDepth = Math.max(info.maxDepth, 1);
     }
   }
 
   function buildModel(doc){
+    const root = doc?.documentElement;
+    if (!root){ throw new Error('Документ не содержит корневой элемент.'); }
     const m = new Map();
-    walk(doc.documentElement, '', m);
+    walk(root, '', m);
     return m;
   }
 
   function emitXsd(model){
-    const root = '/' + model.values().next().value.name;
+    if (!model || model.size===0){ throw new Error('Модель пустая — нечего генерировать.'); }
+    const first = model.values().next().value;
+    if (!first){ throw new Error('Не удалось определить корневой элемент.'); }
+    const root = first.path;
     const lines = [];
     lines.push('<?xml version="1.0" encoding="UTF-8"?>');
     lines.push('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">');
-    emitElement(root, 1);
+    emitElement(root, 1, null);
     lines.push('</xs:schema>');
     return lines.join('\n');
 
-    function emitElement(path, ind){
+    function emitElement(path, ind, occurs){
       const info = model.get(path);
       const pad = '  '.repeat(ind);
-      lines.push(`${pad}<xs:element name="${esc(info.name)}">`);
-      const hasKids = (info.order&&info.order.length)>0;
+      const occursStr = occurs ? ` minOccurs="${occurs.min}" maxOccurs="${occurs.max}"` : '';
+      const nilAttr = (opt.nil && info.nillable) ? ' nillable="true"' : '';
+      const hasKids = info.children.size>0;
       const hasAttrs = info.attrs.size>0;
       const hasText = !!info.textType;
-      if (hasKids || hasAttrs || hasText){
-        lines.push(`${pad}  <xs:complexType>`);
-        if (hasKids){
-          lines.push(`${pad}    <xs:sequence>`);
-          for (const childName of info.order){
-            const meta = info.children.get(childName);
-            const minO = meta.min===0 ? 0 : 1;
-            const maxO = meta.max>1 ? 'unbounded' : 1;
-            const cPath = path + '/' + childName;
-            const cInfo = model.get(cPath);
-            lines.push(`${pad}      <xs:element name="${esc(childName)}" minOccurs="${minO}" maxOccurs="${maxO}">`);
-            const cHasKids = (cInfo.order&&cInfo.order.length)>0;
-            const cHasAttrs = cInfo.attrs.size>0;
-            const cHasText = !!cInfo.textType;
-            if (cHasKids || cHasAttrs || cHasText){
-              lines.push(`${pad}        <xs:complexType>`);
-              if (cHasKids){
-                lines.push(`${pad}          <xs:sequence>`);
-                for (const g of cInfo.order){
-                  const gMeta = cInfo.children.get(g);
-                  const gmin = gMeta.min===0 ? 0 : 1;
-                  const gmax = gMeta.max>1 ? 'unbounded' : 1;
-                  lines.push(`${pad}            <xs:element name="${esc(g)}" minOccurs="${gmin}" maxOccurs="${gmax}"/>`);
-                }
-                lines.push(`${pad}          </xs:sequence>`);
-              }
-              for (const [an, aMeta] of cInfo.attrs.entries()){
-                const use = (opt.nil && aMeta.seenEmpty) ? ' use="optional"' : '';
-                lines.push(`${pad}          <xs:attribute name="${esc(an)}" type="${aMeta.type||TT.STR}"${use}/>`);
-              }
-              if (cHasText){
-                lines.push(`${pad}          <xs:simpleContent>`);
-                lines.push(`${pad}            <xs:extension base="${cInfo.textType}"/>`);
-                lines.push(`${pad}          </xs:simpleContent>`);
-              }
-              lines.push(`${pad}        </xs:complexType>`);
-            } else {
-              const t = cInfo.textType || TT.STR;
-              lines.push(`${pad}        <xs:simpleType><xs:restriction base="${t}"/></xs:simpleType>`);
-            }
-            lines.push(`${pad}      </xs:element>`);
-          }
-          lines.push(`${pad}    </xs:sequence>`);
-        }
-        for (const [an, aMeta] of info.attrs.entries()){
-          const use = (opt.nil && aMeta.seenEmpty) ? ' use="optional"' : '';
-          lines.push(`${pad}    <xs:attribute name="${esc(an)}" type="${aMeta.type||TT.STR}"${use}/>`);
-        }
-        if (!hasKids && hasText){
-          lines.push(`${pad}    <xs:simpleContent>`);
-          lines.push(`${pad}      <xs:extension base="${info.textType}"/>`);
-          lines.push(`${pad}    </xs:simpleContent>`);
-        }
+      if (!hasKids && !hasAttrs){
+        const base = info.textType || TT.STR;
+        lines.push(`${pad}<xs:element name="${esc(info.name)}"${occursStr}${nilAttr} type="${base}"/>`);
+        return;
+      }
+      lines.push(`${pad}<xs:element name="${esc(info.name)}"${occursStr}${nilAttr}>`);
+      if (hasKids){
+        const complexFlags = [];
+        if (hasText){ complexFlags.push('mixed="true"'); }
+        lines.push(`${pad}  <xs:complexType${complexFlags.length ? ' ' + complexFlags.join(' ') : ''}>`);
+        emitChildren(path, info, ind+2);
+        emitAttributes(info, ind+2);
         lines.push(`${pad}  </xs:complexType>`);
+      } else {
+        if (hasText){
+          lines.push(`${pad}  <xs:complexType>`);
+          lines.push(`${pad}    <xs:simpleContent>`);
+          lines.push(`${pad}      <xs:extension base="${info.textType||TT.STR}">`);
+          emitAttributes(info, ind+4);
+          lines.push(`${pad}      </xs:extension>`);
+          lines.push(`${pad}    </xs:simpleContent>`);
+          lines.push(`${pad}  </xs:complexType>`);
+        } else {
+          lines.push(`${pad}  <xs:complexType>`);
+          emitAttributes(info, ind+2);
+          lines.push(`${pad}  </xs:complexType>`);
+        }
       }
       lines.push(`${pad}</xs:element>`);
+    }
+
+    function normalizeOccurs(meta){
+      const min = Math.max(meta?.min ?? 0, 0);
+      const maxVal = meta?.max ?? 1;
+      const max = Number.isFinite(maxVal) ? String(maxVal) : 'unbounded';
+      return {min:String(min), max};
+    }
+
+    function orderByAppearance(info, names){
+      const base = info.appearanceOrder || [];
+      return [...names].sort((a,b)=>{
+        const ia = base.indexOf(a);
+        const ib = base.indexOf(b);
+        if (ia === -1 && ib === -1) return a.localeCompare(b);
+        if (ia === -1) return 1;
+        if (ib === -1) return -1;
+        return ia - ib;
+      });
+    }
+
+    function deriveOrder(info){
+      const names = [...info.children.keys()];
+      if (!names.length) return [];
+      const graph = new Map();
+      const indegree = new Map();
+      for (const name of names){
+        graph.set(name, new Set());
+        indegree.set(name, 0);
+      }
+      for (const [from, tos] of info.edges.entries()){
+        if (!graph.has(from)) continue;
+        for (const to of tos){
+          if (!graph.has(to)) continue;
+          const set = graph.get(from);
+          if (!set.has(to)){
+            set.add(to);
+            indegree.set(to, indegree.get(to)+1);
+          }
+        }
+      }
+      const queue = [];
+      const appearance = info.appearanceOrder || [];
+      for (const [name,deg] of indegree.entries()){
+        if (deg===0) queue.push(name);
+      }
+      queue.sort((a,b)=>{
+        const ia = appearance.indexOf(a);
+        const ib = appearance.indexOf(b);
+        if (ia === -1 && ib === -1) return a.localeCompare(b);
+        if (ia === -1) return 1;
+        if (ib === -1) return -1;
+        return ia - ib;
+      });
+      const result = [];
+      while (queue.length){
+        const name = queue.shift();
+        result.push(name);
+        for (const to of graph.get(name) || []){
+          const nd = indegree.get(to)-1;
+          indegree.set(to, nd);
+          if (nd===0){
+            queue.push(to);
+            queue.sort((a,b)=>{
+              const ia = appearance.indexOf(a);
+              const ib = appearance.indexOf(b);
+              if (ia === -1 && ib === -1) return a.localeCompare(b);
+              if (ia === -1) return 1;
+              if (ib === -1) return -1;
+              return ia - ib;
+            });
+          }
+        }
+      }
+      return result.length === names.length ? result : null;
+    }
+
+    function emitChildren(path, info, indent){
+      const entries = [...info.children.entries()];
+      if (!entries.length) return;
+      const pad = '  '.repeat(indent);
+      const order = deriveOrder(info);
+      const useSequence = order && !info.hasSplitRuns;
+      if (useSequence){
+        lines.push(`${pad}<xs:sequence>`);
+        for (const name of order){
+          const meta = info.children.get(name);
+          emitElement(`${path}/${name}`, indent+1, normalizeOccurs(meta));
+        }
+        lines.push(`${pad}</xs:sequence>`);
+        return;
+      }
+      const allMaxOne = entries.every(([,meta]) => (meta?.max ?? 1) <= 1);
+      if (!info.hasSplitRuns && allMaxOne){
+        lines.push(`${pad}<xs:all>`);
+        for (const name of orderByAppearance(info, entries.map(([n])=>n))){
+          const meta = info.children.get(name);
+          const min = meta?.min > 0 ? 1 : 0;
+          emitElement(`${path}/${name}`, indent+1, {min:String(min), max:'1'});
+        }
+        lines.push(`${pad}</xs:all>`);
+        return;
+      }
+      const seqs = info.sequences || [];
+      const allHaveChildren = seqs.length>0 && seqs.every(seq => seq.length>0);
+      const maxLen = seqs.length>0 ? Math.max(...seqs.map(seq => seq.length)) : 0;
+      const choiceMin = allHaveChildren ? '1' : '0';
+      const choiceMax = maxLen > 0 ? String(maxLen) : '1';
+      lines.push(`${pad}<xs:choice minOccurs="${choiceMin}" maxOccurs="${choiceMax}">`);
+      for (const name of orderByAppearance(info, entries.map(([n])=>n))){
+        const meta = info.children.get(name);
+        emitElement(`${path}/${name}`, indent+1, normalizeOccurs(meta));
+      }
+      lines.push(`${pad}</xs:choice>`);
+    }
+
+    function emitAttributes(info, indent){
+      if (!info.attrs.size) return;
+      const pad = '  '.repeat(indent);
+      for (const [an, aMeta] of info.attrs.entries()){
+        const type = aMeta.type || TT.STR;
+        const required = aMeta.count === info.count && !(opt.nil && aMeta.seenEmpty);
+        const use = required ? 'required' : 'optional';
+        lines.push(`${pad}<xs:attribute name="${esc(an)}" type="${type}" use="${use}"/>`);
+      }
     }
   }
 
