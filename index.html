@@ -1,1 +1,464 @@
+<!DOCTYPE html>
+
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>XML → XSD</title>
+<style>
+  :root{
+    --bg:#ffffff; --fg:#0f1720; --muted:#5a6a7a; --line:#e6e9ee;
+    --badge:#f4f6fa; --hover:rgba(15,23,32,.06);
+    --shadow:0 1px 2px rgba(0,0,0,.06),0 4px 18px rgba(0,0,0,.05);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", Consolas, "Liberation Mono","Courier New", monospace;
+    --sans: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+    --accent:#0ea5e9; --ok:#059669; --warn:#b91c1c;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 var(--sans)}
+  .container{max-width:1100px;margin:0 auto;padding:16px 16px 80px}
+
+.controls{border:1px solid var(--line);border-radius:12px;background:#fff;box-shadow:var(--shadow);
+padding:12px;margin:0 0 12px 0;display:flex;flex-direction:column;gap:10px}
+.drop{border:1px dashed #cfd6df;border-radius:10px;padding:12px 16px;text-align:center;color:var(--muted);
+cursor:pointer;background:#fbfcff}
+.drop.drag{border-color:var(--accent);background:rgba(14,165,233,.06)}
+.opts{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.hint{color:var(--muted);font-size:12px}
+
+.status{display:flex;gap:8px;align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:8px;margin:12px 0}
+.badge{background:var(--badge);color:#223;border:1px solid #e9edf3;padding:4px 8px;border-radius:999px;font-size:12px}
+
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}
+
+.card{border:1px solid var(--line);border-radius:12px;background:#fff;box-shadow:var(--shadow);display:flex;flex-direction:column}
+.card h2{margin:0;padding:10px 12px;border-bottom:1px solid var(--line);font-size:13px;font-weight:600}
+.card .body{padding:10px 12px;display:flex;flex-direction:column}
+
+textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px;resize:vertical;font-family:var(--mono);font-size:12px;min-height:0}
+.io-area{height:380px}
+/* подсветка при DnD на окно XML */
+#xml.dragover{outline:2px dashed var(--accent); outline-offset:4px; background:#f0f9ff}
+
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 0}
+.btn{border:1px solid #cfd6df;background:#fafbfd;color:#203040;padding:8px 12px;border-radius:8px;cursor:pointer}
+.btn.success{background:#ecfdf5;border-color:#a7f3d0;color:#065f46}
+.btn.ghost{background:#fff;border-color:#e5ebf2}
+.btn:disabled{opacity:.55;cursor:not-allowed}
+.btn:active{transform:translateY(1px)}
+
+.err{color:var(--warn);font-size:12px;margin-top:6px;display:none}
+.ok{color:var(--ok);font-size:12px;margin-top:6px;display:none}
+
+.progress-wrap{height:3px;background:transparent;position:relative;overflow:hidden;display:none;margin-top:8px}
+.progress{position:absolute;inset:0 100% 0 0;background:linear-gradient(90deg,#bfe7d8,#6fbba0);animation:load 1.2s linear infinite}
+@keyframes load{0%{inset:0 100% 0 0}50%{inset:0 30% 0 0}100%{inset:0 100% 0 0}} </style>
+
+</head>
+<body>
+<div class="container">
+
+  <!-- верхняя панель (оставляем как было) -->
+
+  <section class="controls">
+    <label class="drop" id="dropzone">
+      <input id="file" type="file" accept=".xml,text/xml,application/xml" style="display:none"/>
+      Перетащите XML сюда или кликните для выбора файла
+    </label>
+    <div class="opts">
+      <span class="hint">Эвристики типов:</span>
+      <label class="hint"><input type="checkbox" id="tBool" checked> boolean</label>
+      <label class="hint"><input type="checkbox" id="tInt" checked> integer</label>
+      <label class="hint"><input type="checkbox" id="tDec" checked> decimal</label>
+      <label class="hint"><input type="checkbox" id="tDate" checked> date</label>
+      <label class="hint"><input type="checkbox" id="tDT" checked> dateTime</label>
+      <label class="hint"><input type="checkbox" id="tNil" checked> пустые → nillable</label>
+    </div>
+  </section>
+
+  <div class="status">
+    <span class="badge" id="badgeFile">Файл: —</span>
+    <span class="badge" id="badgeRoot">Корневой элемент: —</span>
+    <span class="badge" id="badgeNodes">Тегов: 0</span>
+    <span class="badge" id="badgeAttrs">Атрибутов: 0</span>
+    <span class="badge" id="badgeDepth">Глубина: 0</span>
+    <div class="progress-wrap" id="progressWrap"><div class="progress"></div></div>
+  </div>
+
+  <div class="grid">
+    <!-- левая колонка -->
+    <section class="card">
+      <h2>Входной XML</h2>
+      <div class="body">
+        <textarea id="xml" class="io-area" placeholder="Вставьте XML сюда…" spellcheck="false"></textarea>
+
+    <div class="row">
+      <button id="btnClear" class="btn ghost">Очистить</button>
+      <button id="btnParse" class="btn" disabled>Разобрать XML</button>
+      <button id="btnGen" class="btn success" disabled>Сгенерировать XSD</button>
+    </div>
+
+    <div id="err" class="err"></div>
+    <div id="ok" class="ok"></div>
+  </div>
+</section>
+
+<!-- правая колонка -->
+<section class="card">
+  <h2>XSD</h2>
+  <div class="body">
+    <textarea id="xsd" class="io-area" placeholder="Здесь появится XSD…" spellcheck="false"></textarea>
+    <div class="row">
+      <button id="btnCopy" class="btn" disabled>Копировать</button>
+      <button id="btnDownload" class="btn" disabled>Скачать .xsd</button>
+    </div>
+  </div>
+</section>
+
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = sel => document.querySelector(sel);
+
+  const els = {
+    drop: $('#dropzone'), file: $('#file'),
+    btnClear: $('#btnClear'), btnParse: $('#btnParse'), btnGen: $('#btnGen'),
+    xml: $('#xml'), xsd: $('#xsd'),
+    btnCopy: $('#btnCopy'), btnDownload: $('#btnDownload'),
+    err: $('#err'), ok: $('#ok'),
+    badgeFile: $('#badgeFile'), badgeRoot: $('#badgeRoot'), badgeNodes: $('#badgeNodes'),
+    badgeAttrs: $('#badgeAttrs'), badgeDepth: $('#badgeDepth'),
+    progressWrap: $('#progressWrap'),
+    tBool: $('#tBool'), tInt: $('#tInt'), tDec: $('#tDec'), tDate: $('#tDate'), tDT: $('#tDT'), tNil: $('#tNil')
+  };
+
+  let xmlText = '';
+  let xmlDoc = null;
+  let model = null;
+  const opt = { bool:true, int:true, dec:true, date:true, dt:true, nil:true };
+
+  function showErr(msg){ els.err.textContent = msg; els.err.style.display='block'; els.ok.style.display='none'; }
+  function showOk(msg){ els.ok.textContent = msg; els.ok.style.display='block'; els.err.style.display='none'; }
+  function clearMsg(){ els.err.style.display='none'; els.ok.style.display='none'; }
+  function setBusy(b){ els.progressWrap.style.display = b ? 'block':'none'; }
+
+  const TT = { BOOL:'xs:boolean', INT:'xs:integer', DEC:'xs:decimal', DATE:'xs:date', DT:'xs:dateTime', STR:'xs:string' };
+  const rx = {
+    bool: /^(?:true|false|0|1)$/i,
+    int: /^[-+]?\d+$/,
+    dec: /^[-+]?(?:\d+\.\d+|\d+,\d+)$/,
+    date: /^\d{4}-\d{2}-\d{2}$/,
+    dt: /^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}(:\d{2}(?:\.\d{1,6})?)?(?:Z|[+\-]\d{2}:\d{2})?$/
+  };
+  const esc = s => String(s).replace(/[<&>"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+
+  function guess(v){
+    if (v == null) return TT.STR;
+    const s = String(v).trim();
+    if (!s) return TT.STR;
+    if (opt.bool && rx.bool.test(s)) return TT.BOOL;
+    if (opt.int && rx.int.test(s)) return TT.INT;
+    if (opt.dec && rx.dec.test(s)) return TT.DEC;
+    if (opt.dt && rx.dt.test(s)) return TT.DT;
+    if (opt.date && rx.date.test(s)) return TT.DATE;
+    return TT.STR;
+  }
+  function unify(a,b){
+    if (!a) return b||TT.STR; if (!b) return a; if (a===b) return a;
+    if ((a===TT.INT && b===TT.DEC) || (a===TT.DEC && b===TT.INT)) return TT.DEC;
+    if ((a===TT.DATE && b===TT.DT) || (a===TT.DT && b===TT.DATE)) return TT.DT;
+    const order=[TT.BOOL,TT.INT,TT.DEC,TT.DATE,TT.DT,TT.STR];
+    return order[Math.max(order.indexOf(a), order.indexOf(b))];
+  }
+
+  class NodeInfo{
+    constructor(name, path){
+      this.name = name; this.path = path;
+      this.count = 0; this.children = new Map(); this.order = [];
+      this.attrs = new Map();
+      this.textType = null; this.nillable = false; this.maxDepth = 1;
+    }
+  }
+
+  function walk(node, path, model){
+    const name = node.nodeName;
+    const curr = path ? path + '/' + name : '/' + name;
+    let info = model.get(curr);
+    if(!info){ info = new NodeInfo(name, curr); model.set(curr, info); }
+    info.count++;
+
+    if (node.attributes && node.attributes.length){
+      for(const a of node.attributes){
+        const prev = info.attrs.get(a.name) || {type:null,nillable:false,seenEmpty:false};
+        prev.type = unify(prev.type, guess(a.value));
+        if ((a.value??'').trim()===''){ prev.nillable = true; prev.seenEmpty = true; }
+        info.attrs.set(a.name, prev);
+      }
+    }
+
+    const elsKids = [];
+    for(const ch of node.childNodes){
+      if (ch.nodeType===1) elsKids.push(ch);
+      else if (ch.nodeType===3){
+        const t = ch.nodeValue.trim();
+        if (t!==''){ info.textType = unify(info.textType, guess(t)); }
+        else if (opt.nil){ info.nillable = true; }
+      }
+    }
+
+    if (elsKids.length){
+      const perName = new Map();
+      for (const e of elsKids) perName.set(e.nodeName, (perName.get(e.nodeName)||0)+1);
+      for (const [n,c] of perName){
+        const meta = info.children.get(n) || {min:c,max:c};
+        meta.min = Math.min(meta.min, c); meta.max = Math.max(meta.max, c);
+        info.children.set(n, meta);
+        if (!info.order.includes(n)) info.order.push(n);
+      }
+      for (const e of elsKids){
+        walk(e, curr, model);
+        const child = model.get(curr + '/' + e.nodeName);
+        info.maxDepth = Math.max(info.maxDepth, (child?.maxDepth||1)+1);
+      }
+    } else {
+      info.maxDepth = Math.max(info.maxDepth, 1);
+    }
+  }
+
+  function buildModel(doc){
+    const m = new Map();
+    walk(doc.documentElement, '', m);
+    return m;
+  }
+
+  function emitXsd(model){
+    const root = '/' + model.values().next().value.name;
+    const lines = [];
+    lines.push('<?xml version="1.0" encoding="UTF-8"?>');
+    lines.push('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">');
+    emitElement(root, 1);
+    lines.push('</xs:schema>');
+    return lines.join('\n');
+
+    function emitElement(path, ind){
+      const info = model.get(path);
+      const pad = '  '.repeat(ind);
+      lines.push(`${pad}<xs:element name="${esc(info.name)}">`);
+      const hasKids = (info.order&&info.order.length)>0;
+      const hasAttrs = info.attrs.size>0;
+      const hasText = !!info.textType;
+      if (hasKids || hasAttrs || hasText){
+        lines.push(`${pad}  <xs:complexType>`);
+        if (hasKids){
+          lines.push(`${pad}    <xs:sequence>`);
+          for (const childName of info.order){
+            const meta = info.children.get(childName);
+            const minO = meta.min===0 ? 0 : 1;
+            const maxO = meta.max>1 ? 'unbounded' : 1;
+            const cPath = path + '/' + childName;
+            const cInfo = model.get(cPath);
+            lines.push(`${pad}      <xs:element name="${esc(childName)}" minOccurs="${minO}" maxOccurs="${maxO}">`);
+            const cHasKids = (cInfo.order&&cInfo.order.length)>0;
+            const cHasAttrs = cInfo.attrs.size>0;
+            const cHasText = !!cInfo.textType;
+            if (cHasKids || cHasAttrs || cHasText){
+              lines.push(`${pad}        <xs:complexType>`);
+              if (cHasKids){
+                lines.push(`${pad}          <xs:sequence>`);
+                for (const g of cInfo.order){
+                  const gMeta = cInfo.children.get(g);
+                  const gmin = gMeta.min===0 ? 0 : 1;
+                  const gmax = gMeta.max>1 ? 'unbounded' : 1;
+                  lines.push(`${pad}            <xs:element name="${esc(g)}" minOccurs="${gmin}" maxOccurs="${gmax}"/>`);
+                }
+                lines.push(`${pad}          </xs:sequence>`);
+              }
+              for (const [an, aMeta] of cInfo.attrs.entries()){
+                const use = (opt.nil && aMeta.seenEmpty) ? ' use="optional"' : '';
+                lines.push(`${pad}          <xs:attribute name="${esc(an)}" type="${aMeta.type||TT.STR}"${use}/>`);
+              }
+              if (cHasText){
+                lines.push(`${pad}          <xs:simpleContent>`);
+                lines.push(`${pad}            <xs:extension base="${cInfo.textType}"/>`);
+                lines.push(`${pad}          </xs:simpleContent>`);
+              }
+              lines.push(`${pad}        </xs:complexType>`);
+            } else {
+              const t = cInfo.textType || TT.STR;
+              lines.push(`${pad}        <xs:simpleType><xs:restriction base="${t}"/></xs:simpleType>`);
+            }
+            lines.push(`${pad}      </xs:element>`);
+          }
+          lines.push(`${pad}    </xs:sequence>`);
+        }
+        for (const [an, aMeta] of info.attrs.entries()){
+          const use = (opt.nil && aMeta.seenEmpty) ? ' use="optional"' : '';
+          lines.push(`${pad}    <xs:attribute name="${esc(an)}" type="${aMeta.type||TT.STR}"${use}/>`);
+        }
+        if (!hasKids && hasText){
+          lines.push(`${pad}    <xs:simpleContent>`);
+          lines.push(`${pad}      <xs:extension base="${info.textType}"/>`);
+          lines.push(`${pad}    </xs:simpleContent>`);
+        }
+        lines.push(`${pad}  </xs:complexType>`);
+      }
+      lines.push(`${pad}</xs:element>`);
+    }
+  }
+
+  function refreshStats(){
+    if (!model){ els.badgeRoot.textContent = 'Корневой элемент: —'; els.badgeNodes.textContent='Тегов: 0'; els.badgeAttrs.textContent='Атрибутов: 0'; els.badgeDepth.textContent='Глубина: 0'; return; }
+    const all = [...model.values()];
+    const root = all[0]?.name || '—';
+    const attrs = all.reduce((s,n)=>s+n.attrs.size,0);
+    const depth = Math.max(...all.map(n=>n.maxDepth||1),1);
+    els.badgeRoot.textContent = 'Корневой элемент: ' + root;
+    els.badgeNodes.textContent = 'Тегов: ' + all.length;
+    els.badgeAttrs.textContent = 'Атрибутов: ' + attrs;
+    els.badgeDepth.textContent = 'Глубина: ' + depth;
+  }
+
+  // ====== ЗАГРУЗКА ФАЙЛА + АВТО-РАЗБОР + АВТО-ГЕНЕРАЦИЯ ======
+  async function handleLoadedText(text, filename){
+    els.badgeFile.textContent = 'Файл: ' + (filename || '[без имени]');
+    els.xml.value = text;
+    els.btnParse.disabled = false;         // можно парсить вручную
+    els.btnGen.disabled = true;            // до явного/авторазбора выключена
+
+    // авто-разбор
+    try{
+      const parser = new DOMParser();
+      xmlDoc = parser.parseFromString(text || '', 'application/xml');
+      const perr = xmlDoc.getElementsByTagName('parsererror')[0];
+      if (perr) throw new Error('Синтаксическая ошибка XML.');
+      model = buildModel(xmlDoc);
+      refreshStats();
+      els.btnGen.disabled = false;         // после разбора включаем генерацию
+      // авто-генерация
+      const schema = emitXsd(model);
+      els.xsd.value = schema;
+      els.btnCopy.disabled = false; els.btnDownload.disabled = false;
+      showOk('XML загружен, разобран и XSD сгенерирован.');
+    }catch(err){
+      model = null;
+      els.btnGen.disabled = true;
+      showErr(err.message || 'Ошибка разбора XML.');
+    }
+  }
+
+  // ====== DnD на верхнюю дроп-зону ======
+  els.drop.addEventListener('dragover', e => { e.preventDefault(); els.drop.classList.add('drag'); });
+  els.drop.addEventListener('dragleave', () => els.drop.classList.remove('drag'));
+  els.drop.addEventListener('drop', async e => {
+    e.preventDefault(); els.drop.classList.remove('drag');
+    const f = e.dataTransfer.files?.[0]; if (!f) return;
+    if (!/\.xml$/i.test(f.name)){ showErr('Ожидается файл .xml'); return; }
+    clearMsg(); setBusy(true);
+    try{
+      const text = await f.text();
+      await handleLoadedText(text, f.name);
+    }finally{ setBusy(false); }
+  });
+
+  // ====== DnD прямо в окно "Входной XML" (требование №1) ======
+  els.xml.addEventListener('dragover', e => { e.preventDefault(); els.xml.classList.add('dragover'); });
+  els.xml.addEventListener('dragleave', () => els.xml.classList.remove('dragover'));
+  els.xml.addEventListener('drop', async e => {
+    e.preventDefault(); els.xml.classList.remove('dragover');
+    const f = e.dataTransfer.files?.[0];
+    if (f){
+      if (!/\.xml$/i.test(f.name)){ showErr('Ожидается файл .xml'); return; }
+      clearMsg(); setBusy(true);
+      try{
+        const text = await f.text();
+        await handleLoadedText(text, f.name);
+      }finally{ setBusy(false); }
+    } else {
+      // если перетащили просто текст
+      const text = e.dataTransfer.getData('text/plain');
+      if (text){ await handleLoadedText(text, '[вставка текста]'); }
+    }
+  });
+
+  // ====== Выбор файла диалогом ======
+  els.file.addEventListener('change', async e => {
+    const f = e.target.files?.[0]; if (!f) return;
+    clearMsg(); setBusy(true);
+    try{
+      const text = await f.text();
+      await handleLoadedText(text, f.name);
+    }finally{ setBusy(false); }
+  });
+
+  // ====== Очистить ======
+  els.btnClear.addEventListener('click', () => {
+    els.xml.value = ''; els.xsd.value = '';
+    xmlText = ''; xmlDoc=null; model=null;
+    els.btnParse.disabled = true;
+    els.btnGen.disabled = true;                 // требование №2: до разбора — недоступна
+    els.btnCopy.disabled = true; els.btnDownload.disabled = true;
+    els.badgeFile.textContent = 'Файл: —'; els.badgeRoot.textContent='Корневой элемент: —';
+    els.badgeNodes.textContent='Тегов: 0'; els.badgeAttrs.textContent='Атрибутов: 0'; els.badgeDepth.textContent='Глубина: 0';
+    clearMsg();
+  });
+
+  // ====== Разобрать XML (вручную) ======
+  els.btnParse.addEventListener('click', () => {
+    clearMsg(); setBusy(true);
+    try{
+      xmlText = els.xml.value || '';
+      if (!xmlText.trim()){ showErr('Нет XML для разбора.'); setBusy(false); return; }
+      const parser = new DOMParser();
+      xmlDoc = parser.parseFromString(xmlText, 'application/xml');
+      const perr = xmlDoc.getElementsByTagName('parsererror')[0];
+      if (perr) throw new Error('Синтаксическая ошибка XML.');
+      model = buildModel(xmlDoc);
+      refreshStats();
+      els.btnGen.disabled = false;              // после нажатия "Разобрать" — включаем (требование №2)
+      showOk('XML разобран. Можно генерировать XSD.');
+    }catch(err){
+      showErr(err.message || 'Ошибка разбора XML.');
+      model = null; els.btnGen.disabled = true;
+    }finally{ setBusy(false); }
+  });
+
+  // ====== Сгенерировать XSD ======
+  els.btnGen.addEventListener('click', () => {
+    clearMsg(); setBusy(true);
+    try{
+      if (!model){ showErr('Сначала разберите XML.'); setBusy(false); return; }
+      const schema = emitXsd(model);
+      els.xsd.value = schema;
+      els.btnCopy.disabled = false; els.btnDownload.disabled = false;
+      showOk('Схема сгенерирована.');
+    }catch(err){
+      showErr('Ошибка генерации XSD.');
+    }finally{ setBusy(false); }
+  });
+
+  // ====== Копирование / скачивание ======
+  els.btnCopy.addEventListener('click', async () => {
+    const s = els.xsd.value.trim(); if (!s) return;
+    try{ await navigator.clipboard.writeText(s); showOk('Скопировано в буфер обмена.'); }
+    catch(_){ showErr('Не удалось скопировать.'); }
+  });
+  els.btnDownload.addEventListener('click', () => {
+    const s = els.xsd.value.trim(); if (!s) return;
+    const blob = new Blob([s], {type:'application/xml;charset=utf-8'});
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().replaceAll(':','-').split('.')[0];
+    a.href = URL.createObjectURL(blob);
+    a.download = `schema_${stamp}.xsd`;
+    document.body.appendChild(a); a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },0);
+  });
+
+})();
+</script>
+
+</body>
+</html>
 
