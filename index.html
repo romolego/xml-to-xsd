@@ -34,7 +34,8 @@ cursor:pointer;background:#fbfcff}
 
 .card{border:1px solid var(--line);border-radius:12px;background:#fff;box-shadow:var(--shadow);display:flex;flex-direction:column}
 .card h2{margin:0;padding:10px 12px;border-bottom:1px solid var(--line);font-size:13px;font-weight:600}
-.card .body{padding:10px 12px;display:flex;flex-direction:column}
+.card .body{padding:10px 12px;display:flex;flex-direction:column;gap:8px;overflow-wrap:anywhere;word-break:break-word}
+.card .body *{max-width:100%;overflow-wrap:anywhere;word-break:break-word}
 
 textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px;resize:vertical;font-family:var(--mono);font-size:12px;min-height:0}
 .io-area{height:380px}
