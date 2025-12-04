@@ -181,6 +181,7 @@ textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px
       this.count = 0;
       this.children = new Map();
       this.appearanceOrder = [];
+      this.appearanceSet = new Set();
       this.attrs = new Map();
       this.textType = null;
       this.nillable = false;
@@ -190,6 +191,13 @@ textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px
       this.maxSeqLen = 0;
       this.edges = new Map();
       this.hasSplitRuns = false;
+    }
+  }
+
+  function rememberAppearance(info, name){
+    if (!info.appearanceSet.has(name)){
+      info.appearanceSet.add(name);
+      info.appearanceOrder.push(name);
     }
   }
 
@@ -218,8 +226,9 @@ textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px
     const elsKids = [];
     let hasTextHere = false;
     for(const ch of node.childNodes){
-      if (ch.nodeType===1) elsKids.push(ch);
-      else if (ch.nodeType===3){
+      if (ch.nodeType===1){
+        elsKids.push(ch);
+      } else if (ch.nodeType===3){
         const t = ch.nodeValue.trim();
         if (t!==''){ info.textType = unify(info.textType, guess(t)); hasTextHere = true; }
         else if (opt.nil){ info.nillable = true; }
@@ -228,7 +237,10 @@ textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px
 
     if (elsKids.length){
       const perName = new Map();
-      for (const e of elsKids) perName.set(e.nodeName, (perName.get(e.nodeName)||0)+1);
+      for (const e of elsKids){
+        const n = e.nodeName;
+        perName.set(n, (perName.get(n)||0)+1);
+      }
       for (const [childName, meta] of info.children.entries()){
         if (!perName.has(childName)){
           meta.min = 0;
@@ -239,21 +251,24 @@ textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px
         if (!meta){
           meta = {min:c,max:c};
           info.children.set(n, meta);
-          if (!info.appearanceOrder.includes(n)) info.appearanceOrder.push(n);
+          rememberAppearance(info, n);
         } else {
           meta.min = Math.min(meta.min, c);
           meta.max = Math.max(meta.max, c);
         }
       }
-      const seqNames = elsKids.map(e=>e.nodeName);
       info.seqCount += 1;
-      info.maxSeqLen = Math.max(info.maxSeqLen, seqNames.length);
-      if (!seqNames.length) info.emptySeqCount += 1;
+      info.maxSeqLen = Math.max(info.maxSeqLen, elsKids.length);
       const runs = [];
-      for (const name of seqNames){
-        const last = runs[runs.length-1];
-        if (last && last.name === name) last.count += 1;
-        else runs.push({name,count:1});
+      let prevName = null;
+      for (const e of elsKids){
+        const name = e.nodeName;
+        if (runs.length===0 || prevName !== name){
+          runs.push({name,count:1});
+        } else {
+          runs[runs.length-1].count += 1;
+        }
+        prevName = name;
       }
       if (!info.hasSplitRuns){
         const seen = new Set();
@@ -262,21 +277,20 @@ textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px
           seen.add(r.name);
         }
       }
-      const uniqSeq = [];
-      for (const name of seqNames){
-        if (uniqSeq[uniqSeq.length-1] !== name){ uniqSeq.push(name); }
-      }
-      for (let i=0;i<uniqSeq.length-1;i++){
-        const from = uniqSeq[i];
-        const to = uniqSeq[i+1];
-        if (!info.edges.has(from)) info.edges.set(from, new Set());
-        info.edges.get(from).add(to);
+      let lastName = null;
+      for (const e of elsKids){
+        const name = e.nodeName;
+        if (name !== lastName && lastName !== null){
+          if (!info.edges.has(lastName)) info.edges.set(lastName, new Set());
+          info.edges.get(lastName).add(name);
+        }
+        lastName = name;
       }
       for (const e of elsKids){
         walk(e, curr, model);
         const child = model.get(curr + '/' + e.nodeName);
         info.maxDepth = Math.max(info.maxDepth, (child?.maxDepth||1)+1);
-        if (!info.appearanceOrder.includes(e.nodeName)) info.appearanceOrder.push(e.nodeName);
+        rememberAppearance(info, e.nodeName);
       }
     } else {
       for (const meta of info.children.values()) meta.min = 0;
@@ -473,12 +487,18 @@ textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px
 
   function refreshStats(){
     if (!model){ els.badgeRoot.textContent = 'Корневой элемент: —'; els.badgeNodes.textContent='Тегов: 0'; els.badgeAttrs.textContent='Атрибутов: 0'; els.badgeDepth.textContent='Глубина: 0'; return; }
-    const all = [...model.values()];
-    const root = all[0]?.name || '—';
-    const attrs = all.reduce((s,n)=>s+n.attrs.size,0);
-    const depth = Math.max(...all.map(n=>n.maxDepth||1),1);
+    let root = '—';
+    let attrs = 0;
+    let depth = 1;
+    let idx = 0;
+    for (const n of model.values()){
+      if (idx===0) root = n.name;
+      attrs += n.attrs.size;
+      if ((n.maxDepth||1) > depth) depth = n.maxDepth||1;
+      idx++;
+    }
     els.badgeRoot.textContent = 'Корневой элемент: ' + root;
-    els.badgeNodes.textContent = 'Тегов: ' + all.length;
+    els.badgeNodes.textContent = 'Тегов: ' + model.size;
     els.badgeAttrs.textContent = 'Атрибутов: ' + attrs;
     els.badgeDepth.textContent = 'Глубина: ' + depth;
   }
