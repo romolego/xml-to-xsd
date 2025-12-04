@@ -185,7 +185,9 @@ textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px
       this.textType = null;
       this.nillable = false;
       this.maxDepth = 1;
-      this.sequences = [];
+      this.seqCount = 0;
+      this.emptySeqCount = 0;
+      this.maxSeqLen = 0;
       this.edges = new Map();
       this.hasSplitRuns = false;
     }
@@ -244,7 +246,9 @@ textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px
         }
       }
       const seqNames = elsKids.map(e=>e.nodeName);
-      info.sequences.push(seqNames);
+      info.seqCount += 1;
+      info.maxSeqLen = Math.max(info.maxSeqLen, seqNames.length);
+      if (!seqNames.length) info.emptySeqCount += 1;
       const runs = [];
       for (const name of seqNames){
         const last = runs[runs.length-1];
@@ -276,7 +280,8 @@ textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px
       }
     } else {
       for (const meta of info.children.values()) meta.min = 0;
-      info.sequences.push([]);
+      info.seqCount += 1;
+      info.emptySeqCount += 1;
       info.maxDepth = Math.max(info.maxDepth, 1);
     }
   }
@@ -441,9 +446,9 @@ textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px
         lines.push(`${pad}</xs:all>`);
         return;
       }
-      const seqs = info.sequences || [];
-      const allHaveChildren = seqs.length>0 && seqs.every(seq => seq.length>0);
-      const maxLen = seqs.length>0 ? Math.max(...seqs.map(seq => seq.length)) : 0;
+      const hasSeqs = info.seqCount > 0;
+      const allHaveChildren = hasSeqs && info.emptySeqCount === 0;
+      const maxLen = hasSeqs ? info.maxSeqLen : 0;
       const choiceMin = allHaveChildren ? '1' : '0';
       const choiceMax = maxLen > 0 ? String(maxLen) : '1';
       lines.push(`${pad}<xs:choice minOccurs="${choiceMin}" maxOccurs="${choiceMax}">`);
